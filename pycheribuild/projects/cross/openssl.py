@@ -34,9 +34,8 @@ from .crosscompileproject import (CrossCompileProject, DefaultInstallDir, FettPr
 
 
 class BuildOpenSSL(CrossCompileProject):
-    # Just add the FETT target below for now.
-    do_not_add_to_targets = True
     build_in_source_dir = True
+    path_in_rootfs = "/usr/local"
 
     repository = GitRepository("https://github.com/CTSRD-CHERI/openssl.git")
 
@@ -51,16 +50,22 @@ class BuildOpenSSL(CrossCompileProject):
         self.configure_args.append(str(self.source_dir / "Configure"))
         self.configure_args.append("BSD-generic64")
         self.configure_args.append("-shared")
-        self.configure_args.append("--install-prefix=" + str(self.destdir))
+        # XXX: should be based on version
+        if self.project_name != "fett-openssl":
+            self.configure_args.append("--prefix=" + str(self.destdir) + str(self._install_prefix))
         if not self._xtarget.is_native():
-            self.configure_args.append("--openssldir=" + str(self._install_prefix))
-
-    def compile(self, **kwargs):
-        # link errors at -j40
-        super().compile(parallel=False)
+            self.configure_args.append("--openssldir=" + str(self.destdir) + str(self._install_prefix))
 
 
 class BuildFettOpenSSL(FettProjectMixin, BuildOpenSSL):
     project_name = "fett-openssl"
     repository = GitRepository("https://github.com/CTSRD-CHERI/openssl.git",
                                default_branch="fett")
+
+    def setup(self):
+        super().setup()
+        self.configure_args.append("--install-prefix=" + str(self.destdir))
+
+    def compile(self, **kwargs):
+        # link errors at -j40
+        super().compile(parallel=False)

@@ -1069,6 +1069,223 @@ class BuildMfsRootCheriBSDDiskImage(BuildMinimalCheriBSDDiskImage):
         return self._source_class
 
 
+class BuildBesspinCheriBSDDiskImage(BuildDiskImageBase):
+    project_name = "disk-image-besspin"
+    _source_class = BuildCHERIBSD
+    disk_image_prefix = "cheribsd-besspin"
+    include_boot = True
+
+    @classmethod
+    def setup_config_options(cls, **kwargs):
+        super().setup_config_options(default_hostname=_default_disk_image_hostname("cheribsd-besspin"),
+                                     extra_files_suffix="-besspin", **kwargs)
+
+    def __init__(self, config: CheriConfig):
+        super().__init__(config)
+        self.minimum_image_size = "20m"  # let's try to shrink the image size
+        self.is_minimal = True
+
+    @property
+    def include_swap_partition(self):
+        return False
+
+    def add_unlisted_files_to_metalog(self):
+        return
+
+    def make_rootfs_image(self, rootfs_img: Path):
+        self.mtree.exclude_matching([
+            "./boot/*",
+            "./rescue/*",
+            "./usr/tests/*",
+            "./usr/include/*",
+            "./usr/lib/debug/*",
+            "./usr/lib/snmp*",
+            "./usr/lib64*",
+            "./usr/libcheri*",
+            "./usr/share/*",
+            "*.a",
+            "*.o",
+            "./usr/local/*"])
+
+        bin_globs = ["cheri*", "ed", "red", "helloworld*", "pax"]
+        self.mtree.exclude_matching(list(map(lambda p: "./bin/" + p, bin_globs)))
+
+        lib_globs = ["geom*"]
+        self.mtree.exclude_matching(list(map(lambda p: "./lib/" + p, lib_globs)))
+
+        libexec_globs = ["ld-elf-debug.so.1", "ld-elf64.so.1"]
+        self.mtree.exclude_matching(list(map(lambda p: "./libexec/" + p, libexec_globs)))
+        sbin_globs = [
+            "camcontrol",
+            "pfctl",
+            "ip*",
+            "hastd",
+            "fsdb",
+            "restore",
+            "rrestore",
+            "dump",
+            "rdump",
+            "fsck_msdosfs",
+            "rtsol",
+            "gbde",
+            "iscontrol",
+            "tunefs",
+            "natd"]
+        self.mtree.exclude_matching(list(map(lambda p: "./sbin/" + p, sbin_globs)))
+
+        usr_bin_globs = [
+            "qtrace",
+            "dtc",
+            "openssl",
+            "ex",
+            "nex",
+            "nvi",
+            "nview",
+            "vi",
+            "view",
+            "mandoc",
+            "ntpq",
+            "flex*",
+            "lex*",
+            "make",
+            "bc",
+            "dc",
+            "netstat",
+            "*ftp*",
+            "telnet",
+            "objcopy",
+            "strip",
+            "yacc",
+            "sysstat",
+            "edit",
+            "ee",
+            "ree",
+            "asn1_compile",
+            "Mail",
+            "mail*",
+            "nm",
+            "vacation",
+            "addr3line",
+            "sftp",
+            "kadmin",
+            "truss",
+            "bsnmp*",
+            "rpcgen",
+            "top",
+            "localdef",
+            "drill",
+            "hxtool",
+            "cu",
+            "tip",
+            "patch",
+            "m4",
+            "calendar",
+            "dialog",
+            "mkimp",
+            "kdump",
+            "diff",
+            "slc",
+            "tftp",
+            "indent",
+            "iscsictl",
+            "ar",
+            "ranlib",
+            "lpr",
+            "bsdiff",
+            "vmstat",
+            "kcc",
+            "klist",
+            "kswitch",
+            "lpq",
+            "users",
+            "unifdef",
+            "lprm",
+            "pr",
+            "primes",
+            "crunchgen",
+            "vtfontcvt",
+            "gprof",
+            "finger",
+            "ssh-agent",
+            "syscall_timing",
+            "nc",
+            "diff3",
+            "bsdcpio",
+            "nfsstat",
+            "host",
+            "rpcinfo",
+            "elfdump",
+            "at",
+            "atq",
+            "atrm",
+            "batch",
+            "hd",
+            "hexdump",
+            "od",
+            "sockstat"
+        ]
+        self.mtree.exclude_matching(list(map(lambda p: "./usr/bin/" + p, usr_bin_globs)))
+
+        usr_lib_exceptions = [
+            "pam_*",
+            "libgnuregex.so.5",
+            "libdevinfo.so.6",
+            "libbz2.so.4",
+            "libpam.so.6",
+            "libbsm.so.3",
+            "libprivatessh.so.5",
+            "libblacklist.so.0",
+            "libgssapi_krb5.so.10",
+            "libgssapi.so.10",
+            "libkrb5.so.11",
+            "libwrap.so.6",
+            "libprivateldns.so.5",
+            "libroken.so.11",
+            "libopie.so.8",
+            "libasn1.so.11",
+            "libypclnt.so.4",
+            "libcom_err.so.5",
+            "libhx509.so.11",
+            "libwind.so.11",
+            "libheimbase.so.11",
+            "libprivateheimipcc.so.11",
+            "libssl.so.111"
+        ]
+        self.mtree.exclude_matching("./usr/lib/*", list(map(lambda p: "./usr/lib/" + p, usr_lib_exceptions)))
+
+        self.mtree.exclude_matching("./usr/libexec/*", ["*/getty"])
+
+        usr_sbin_exceptions = [
+            "service",
+            "sshd",
+            "newsyslog",
+            "utx",
+            "syslogd"
+        ]
+        self.mtree.exclude_matching("./usr/sbin/*", list(map(lambda p: "./usr/sbin/" + p, usr_sbin_exceptions)))
+
+        if self.config.debug_output:
+            self.mtree.write(sys.stderr, pretend=self.config.pretend)
+        if self.config.verbose:
+            self.run_cmd("du", "-ah", self.tmpdir)
+            self.run_cmd("sh", "-c", "du -ah '{}' | sort -h".format(self.tmpdir))
+        super().make_rootfs_image(rootfs_img)
+
+
+class BuildBesspinMfsRootCheriBSDDiskImage(BuildBesspinCheriBSDDiskImage):
+    project_name = "disk-image-besspin-mfs-root"
+    disk_image_prefix = "cheribsd-besspin-mfs-root"
+    include_boot = False
+
+    @property
+    def rootfs_only(self):
+        return True
+
+    @property
+    def cheribsd_class(self):
+        return self._source_class
+
+
 class BuildCheriBSDDiskImage(BuildDiskImageBase):
     project_name = "disk-image"
     _source_class = BuildCHERIBSD

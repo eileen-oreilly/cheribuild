@@ -1383,6 +1383,11 @@ class BuildCheriBsdMfsKernel(SimpleProject):
     def supported_architectures(self) -> list:
         return list(CompilationTargets.ALL_CHERIBSD_MIPS_AND_RISCV_TARGETS)
 
+    @classproperty
+    def mfs_root_image_class(self):
+        from ..disk_image import BuildMfsRootCheriBSDDiskImage
+        return BuildMfsRootCheriBSDDiskImage
+
     @classmethod
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
@@ -1391,8 +1396,7 @@ class BuildCheriBsdMfsKernel(SimpleProject):
 
     def __init__(self, config: CheriConfig):
         super().__init__(config)
-        from ..disk_image import BuildMfsRootCheriBSDDiskImage
-        self.mfs_root_image_instance = BuildMfsRootCheriBSDDiskImage.get_instance(self)
+        self.mfs_root_image_instance = self.mfs_root_image_class.get_instance(self)
         # Re-use the same build directory as the CheriBSD target that was used for the disk image
         # This ensure that the kernel build tools can be found in the build directory
         self.image = self.mfs_root_image_instance.disk_image_path
@@ -1536,6 +1540,15 @@ class BuildCheriBsdMfsImageAndKernels(TargetAliasWithDependencies):
     @classproperty
     def supported_architectures(self):
         return BuildCheriBsdMfsKernel.supported_architectures
+
+
+class BuildBesspinCheriBsdMfsKernel(BuildCheriBsdMfsKernel):
+    project_name = "besspin-cheribsd-mfs-root-kernel"
+
+    @classproperty
+    def mfs_root_image_class(self):
+        from ..disk_image import BuildBesspinMfsRootCheriBSDDiskImage
+        return BuildBesspinMfsRootCheriBSDDiskImage
 
 
 # def cheribsd_minimal_install_dir(config: CheriConfig, project: SimpleProject):

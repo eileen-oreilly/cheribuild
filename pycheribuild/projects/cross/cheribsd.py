@@ -967,7 +967,7 @@ class BuildFreeBSD(BuildFreeBSDBase):
             # ERROR: cam_periph.c: die 25130: unknown base type encoding 0xffffffffffffffa1
             kernel_options.set_with_options(CTF=False)
             # Only build VirtIO and SMB modules (since e.g. Linux module is broken)
-            kernel_options.set(MODULES_OVERRIDE="virtio smbfs libiconv libmchain")
+            kernel_options.set(MODULES_OVERRIDE="virtio smbfs libiconv libmchain contigmem)
         if not self.use_bootstrapped_toolchain:
             # We can't use LLD for the kernel yet but there is a flag to experiment with it
             kernel_options.update(self.cross_toolchain_config)

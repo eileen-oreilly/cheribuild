@@ -902,18 +902,12 @@ class BuildFreeBSD(BuildFreeBSDBase):
             self.cross_toolchain_config.set(TARGET_CPUTYPE="i686")
 
         if self.linker_for_world == "bfd":
-            # self.cross_toolchain_config.set_env(XLDFLAGS="-fuse-ld=bfd")
-            target_flags += " -fuse-ld=bfd -Qunused-arguments"
             # If WITH_LD_IS_LLD is set (e.g. by reading src.conf) the symlink ld -> ld.bfd in $BUILD_DIR/tmp/ won't be
             # created and the build system will then fall back to using /usr/bin/ld which won't work!
             self.cross_toolchain_config.set_with_options(LLD_IS_LD=False)
             self.cross_toolchain_config.set_env(XLD=cross_prefix + "ld.bfd"),
         else:
             assert self.linker_for_world == "lld"
-            # TODO: we should have a better way of passing linker flags than adding them to XCFLAGS
-            linker_flags = "-fuse-ld=lld -Qunused-arguments"
-            # self.cross_toolchain_config.set_env(XLDFLAGS=linker_flags)
-            target_flags += " " + linker_flags
             # Don't set XLD when using bfd since it will pick up ld.bfd from the build directory
             self.cross_toolchain_config.set_env(XLD=cross_prefix + "ld.lld"),
 
@@ -972,17 +966,14 @@ class BuildFreeBSD(BuildFreeBSDBase):
             # We can't use LLD for the kernel yet but there is a flag to experiment with it
             kernel_options.update(self.cross_toolchain_config)
             linker = Path(self.target_info.sdk_root_dir, "bin", "ld." + self.linker_for_kernel)
-            fuse_ld_flag = "-fuse-ld=" + str(linker)
             kernel_options.remove_var("LDFLAGS")
-            kernel_options.set(LD=linker, XLD=linker, HACK_EXTRA_FLAGS="-shared " + fuse_ld_flag,
-                               TRAMP_LDFLAGS=fuse_ld_flag)
+            kernel_options.set(LD=linker, XLD=linker)
             # The kernel build using ${BINUTIL} directly and not X${BINUTIL}:
             for binutil_name in ("AS", "AR", "NM", "OBJCOPY", "RANLIB", "SIZE", "STRINGS", "STRIPBIN"):
                 xbinutil = kernel_options.get_var("X" + binutil_name)
                 if xbinutil:
                     kernel_options.set(**{binutil_name: xbinutil})
                     kernel_options.remove_var("X" + binutil_name)
-            kernel_options.set_env(LDFLAGS=fuse_ld_flag, XLDFLAGS=fuse_ld_flag)
         kernel_options.set(KERNCONF=kernconf)
         if self.add_debug_info_flag:
             self.make_args.set(DEBUG="-g")
@@ -1465,9 +1456,8 @@ class BuildFreeBSD(BuildFreeBSDBase):
 # Build FreeBSD with the default options (build the bundled clang instead of using the SDK one)
 # also don't add any of the default -DWITHOUT/DWITH_FOO options
 class BuildFreeBSDWithDefaultOptions(BuildFreeBSD):
-    project_name = "freebsd"
     target = "freebsd-with-default-options"
-    repository = GitRepository("https://github.com/freebsd/freebsd.git")
+    repository = ReuseOtherProjectRepository(BuildFreeBSD, do_update=True)
     build_dir_suffix = "-default-options"
     add_custom_make_options = False
     hide_options_from_help = True  # hide this from --help for now
@@ -1511,7 +1501,8 @@ def jflag_for_universe(config: CheriConfig, proj):
 
 # Build all targets (to test my changes)
 class BuildFreeBSDUniverse(BuildFreeBSDBase):
-    project_name = "freebsd-universe"
+    # Note: this is a seperate repository checkout, should probably just reuse the same source dir?
+    default_directory_basename = "freebsd-universe"
     target = "freebsd-universe"
     repository = GitRepository("https://github.com/freebsd/freebsd.git")
     default_install_dir = DefaultInstallDir.DO_NOT_INSTALL
@@ -1578,7 +1569,7 @@ class BuildFreeBSDUniverse(BuildFreeBSDBase):
 
 
 class BuildCHERIBSD(BuildFreeBSD):
-    project_name = "cheribsd"
+    default_directory_basename = "cheribsd"
     target = "cheribsd"
     can_build_with_system_clang = False  # We need CHERI LLVM for most architectures
     repository = GitRepository("https://github.com/CTSRD-CHERI/cheribsd.git")
@@ -1775,8 +1766,8 @@ class BuildCHERIBSD(BuildFreeBSD):
 
 
 class BuildCheriBSDFett(BuildCHERIBSD):
-    project_name = "cheribsd"  # reuse working directory
     target = "cheribsd-fett"
+    repository = ReuseOtherProjectRepository(BuildCHERIBSD, do_update=True)
     supported_architectures = CompilationTargets.FETT_SUPPORTED_ARCHITECTURES
     default_architecture = CompilationTargets.FETT_DEFAULT_ARCHITECTURE
     hide_options_from_help = True  # hide this from --help for now
@@ -1795,7 +1786,7 @@ class BuildCheriBSDFett(BuildCHERIBSD):
 
 
 class BuildCheriBsdMfsKernel(BuildCHERIBSD):
-    project_name = "cheribsd-mfs-root-kernel"
+    target = "cheribsd-mfs-root-kernel"
     dependencies = ["disk-image-mfs-root"]
     repository = ReuseOtherProjectRepository(source_project=BuildCHERIBSD, do_update=True)
     supported_architectures = CompilationTargets.ALL_CHERIBSD_MIPS_AND_RISCV_TARGETS
@@ -1923,7 +1914,7 @@ class BuildCheriBsdMfsImageAndKernels(TargetAliasWithDependencies):
 #
 #
 # class BuildCHERIBSDMinimal(BuildCHERIBSD):
-#     project_name = "cheribsd"  # reuse the same source dir
+#     repository = ReuseOtherProjectRepository(BuildCHERIBSD, do_update=True)  # reuse the same source dir
 #     target = "cheribsd-minimal"
 #     _config_inherits_from = "cheribsd"  # we want the CheriBSD config options as well
 #
@@ -1989,7 +1980,7 @@ class BuildCheriBsdMfsImageAndKernels(TargetAliasWithDependencies):
 
 
 class BuildCheriBsdSysrootArchive(SimpleProject):
-    project_name = "cheribsd-sysroot"
+    target = "cheribsd-sysroot"
     is_sdk_target = True
     rootfs_source_class = BuildCHERIBSD  # type: typing.Type[BuildCHERIBSD]
 

@@ -78,6 +78,7 @@ BOOT_FAILURE2 = "wait for /bin/sh on /etc/rc failed'"
 BOOT_FAILURE3 = "Manual root filesystem specification:"  # rootfs mount failed
 SHELL_OPEN = "exec /bin/sh"
 LOGIN = "login:"
+LOGIN_AS_ROOT_MINIMAL = "Logging in as root..."
 INITIAL_PROMPT_CSH = re.compile(r"root@.+:.+# ")  # /bin/csh
 INITIAL_PROMPT_SH = "# "  # /bin/sh
 STOPPED = "Stopped at"
@@ -420,13 +421,22 @@ def is_newer(path1: Path, path2: Path):
 
 
 def prepend_ld_library_path(qemu: CheriBSDInstance, path: str):
-    qemu.run("export LD_LIBRARY_PATH=" + path + ":$LD_LIBRARY_PATH", timeout=3)
-    qemu.run("export LD_CHERI_LIBRARY_PATH=" + path + ":$LD_LIBRARY_PATH", timeout=3)
+    qemu.run("export LD_LIBRARY_PATH=" + path + ":$LD_LIBRARY_PATH; echo \"$LD_LIBRARY_PATH\"", timeout=3)
+    qemu.run("export LD_CHERI_LIBRARY_PATH=" + path + ":$LD_CHERI_LIBRARY_PATH; echo \"$LD_CHERI_LIBRARY_PATH\"",
+             timeout=3)
 
 
 def set_ld_library_path_with_sysroot(qemu: CheriBSDInstance):
     non_cheri_libdir = "lib64"
     cheri_libdir = "libcheri"
+    if not qemu.xtarget.is_hybrid_or_purecap_cheri():
+        local_dir = "usr/local"
+        if qemu.xtarget.target_info_cls.is_cheribsd():
+            local_dir += "/" + qemu.xtarget.generic_suffix
+        qemu.run("export {var}=/{l}:/usr/{l}:/usr/local/{l}:/sysroot/{l}:/sysroot/usr/{l}:"
+                 "/sysroot/{prefix}/{l}:${var}".format(prefix=local_dir, l="lib", var="LD_LIBRARY_PATH"), timeout=3)
+        return
+
     purecap_install_prefix = "usr/local/" + qemu.xtarget.get_cheri_purecap_target().generic_suffix
     hybrid_install_prefix = "usr/local/" + qemu.xtarget.get_cheri_hybrid_target().generic_suffix
     nocheri_install_prefix = "usr/local/" + qemu.xtarget.get_non_cheri_target().generic_suffix
@@ -434,11 +444,12 @@ def set_ld_library_path_with_sysroot(qemu: CheriBSDInstance):
     noncheri_ld_lib_path_var = "LD_LIBRARY_PATH" if not qemu.xtarget.is_cheri_purecap() else "LD_64_LIBRARY_PATH"
     cheri_ld_lib_path_var = "LD_LIBRARY_PATH" if qemu.xtarget.is_cheri_purecap() else "LD_CHERI_LIBRARY_PATH"
     qemu.run("export {var}=/{lib}:/usr/{lib}:/usr/local/{lib}:/sysroot/{lib}:/sysroot/usr/{lib}:/sysroot/{hybrid}/lib:"
-             "/sysroot/{noncheri}/lib".format(lib=non_cheri_libdir, hybrid=hybrid_install_prefix,
-                                              noncheri=nocheri_install_prefix,
-                                              var=noncheri_ld_lib_path_var), timeout=3)
-    qemu.run("export {var}=/{l}:/usr/{l}:/usr/local/{l}:/sysroot/{l}:/sysroot/usr/{l}:/sysroot/{prefix}/lib".format(
-        prefix=purecap_install_prefix, l=cheri_libdir, var=cheri_ld_lib_path_var), timeout=3)
+             "/sysroot/{noncheri}/lib:${var}".format(lib=non_cheri_libdir, hybrid=hybrid_install_prefix,
+                                                     noncheri=nocheri_install_prefix,
+                                                     var=noncheri_ld_lib_path_var), timeout=3)
+    qemu.run("export {var}=/{l}:/usr/{l}:/usr/local/{l}:/sysroot/{l}:/sysroot/usr/{l}:"
+             "/sysroot/{prefix}/lib:${var}".format(prefix=purecap_install_prefix, l=cheri_libdir,
+                                                   var=cheri_ld_lib_path_var), timeout=3)
 
 
 def maybe_decompress(path: Path, force_decompression: bool, keep_archive=True, args: argparse.Namespace = None, *,
@@ -760,7 +771,7 @@ def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path]
             qemu_args.append("-append")
             qemu_args.append(" ".join(kernel_commandline))
         else:
-            warn("Cannot pass kernel command line when booting disk image: ", kernel_commandline, exit=False)
+            warn("Cannot pass kernel command line when booting disk image: ", kernel_commandline)
     success("Starting QEMU: ", " ".join(qemu_args))
     qemu_starttime = datetime.datetime.now()
     global _SSH_SOCKET_PLACEHOLDER
@@ -818,7 +829,7 @@ def boot_and_login(child: CheriBSDSpawnMixin, *, starttime, kernel_init_only=Fal
                 success("===> init running (kernel startup time: ", userspace_starttime - starttime, ")")
 
         userspace_starttime = datetime.datetime.now()
-        boot_expect_strings = [LOGIN, SHELL_OPEN, BOOT_FAILURE, BOOT_FAILURE2,
+        boot_expect_strings = [LOGIN, LOGIN_AS_ROOT_MINIMAL, SHELL_OPEN, BOOT_FAILURE, BOOT_FAILURE2,
                                BOOT_FAILURE3]  # type: typing.List[typing.Union[str, typing.Pattern]]
         i = child.expect(boot_expect_strings + ["DHCPACK from "] + FATAL_ERROR_MESSAGES, timeout=15 * 60,
                          timeout_msg="timeout awaiting login prompt")
@@ -850,6 +861,14 @@ def boot_and_login(child: CheriBSDSpawnMixin, *, starttime, kernel_init_only=Fal
                 _set_pexpect_sh_prompt(child)
         elif i == boot_expect_strings.index(SHELL_OPEN):  # shell started from /etc/rc:
             child.expect_exact([INITIAL_PROMPT_SH], timeout=30)
+            success("===> /etc/rc completed, got command prompt")
+            _set_pexpect_sh_prompt(child)
+        elif i == boot_expect_strings.index(LOGIN_AS_ROOT_MINIMAL):  # login -f root from /etc/rc:
+            child.expect([INITIAL_PROMPT_SH], timeout=3 * 60, timeout_msg="timeout logging in")
+            # Note: the default shell in the minimal images is csh (but without the default prompt).
+            child.sendline("sh")
+            child.expect([INITIAL_PROMPT_SH], timeout=3 * 60,
+                         timeout_msg="timeout starting /bin/sh")
             success("===> /etc/rc completed, got command prompt")
             _set_pexpect_sh_prompt(child)
         else:  # BOOT_FAILURE or FATAL_ERROR_MESSAGES
@@ -964,6 +983,9 @@ def _do_test_setup(qemu: QemuCheriBSDInstance, args: argparse.Namespace, test_ar
     if ld_preload_target_paths:
         checked_run_cheribsd_command(qemu, "export '{}={}'".format(args.test_ld_preload_variable,
                                                                    ":".join(ld_preload_target_paths)))
+
+    if args.extra_library_paths:
+        prepend_ld_library_path(qemu, ":".join(args.extra_library_paths))
     success("Preparing test enviroment took ", datetime.datetime.now() - setup_tests_starttime)
     if test_setup_function:
         setup_tests_starttime = datetime.datetime.now()
@@ -1068,11 +1090,12 @@ def get_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-archive", "-t", action="append", nargs=1)
     parser.add_argument("--test-command", "-c")
     parser.add_argument('--test-ld-preload', action="append", nargs=1, metavar='LIB',
-                        help="Copy LIB to the guest andLD_PRELOAD it before running tests")
+                        help="Copy LIB to the guest and LD_PRELOAD it before running tests")
+    parser.add_argument('--extra-library-path', action="append", dest="extra_library_paths", metavar="DIR",
+                        help="Add DIR as an additional LD_LIBRARY_PATH before running tests")
     parser.add_argument('--test-ld-preload-variable', type=str, default=None,
                         help="The environment variable to set to LD_PRELOAD a library. should be set to either "
-                             "LD_PRELOAD or "
-                             "LD_CHERI_PRELOAD")
+                             "LD_PRELOAD or LD_CHERI_PRELOAD")
     parser.add_argument("--test-timeout", "-tt", type=int, default=60 * 60,
                         help="Timeout in seconds for running tests")
     # noinspection PyTypeChecker

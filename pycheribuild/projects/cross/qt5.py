@@ -149,13 +149,12 @@ class BuildQtWithConfigureScript(CrossCompileProject):
         self.configure_args.extend([
             # To ensure the host and cross-compiled version is the same also disable opengl
             "-no-opengl",
-            # Missing configure check for evdev means it will fail to compile for CHERI
-            "-no-evdev",
             # Needed for webkit:
             # "-icu",
-            "-no-Werror",
+            # "-no-Werror",
             "-no-use-gold-linker",
-            "-no-iconv"
+            "-no-iconv",
+            "-no-headersclean",
         ])
         if self.build_tests:
             self.configure_args.append("-developer-build")
@@ -218,7 +217,6 @@ class BuildQtWithConfigureScript(CrossCompileProject):
                 "-no-syslog",
                 "-no-gui",
                 "-no-iconv",
-                "-no-headersclean",
             ])
         else:
             self.configure_args.append("-dbus")  # we want to build QtDBus
@@ -460,7 +458,8 @@ class BuildQtSVG(BuildQtModuleWithQMake):
 
 class BuildQtDeclarative(BuildQtModuleWithQMake):
     target = "qtdeclarative"
-    repository = GitRepository("https://github.com/CTSRD-CHERI/qtbase.git", default_branch="5.15", force_branch=True)
+    repository = GitRepository("https://github.com/CTSRD-CHERI/qtdeclarative.git", default_branch="5.15",
+                               force_branch=True)
 
 
 # Webkit needs ICU (and recommended for QtBase too):

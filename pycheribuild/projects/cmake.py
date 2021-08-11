@@ -32,14 +32,14 @@
 #
 from .project import (AutotoolsProject, CheriConfig, CMakeProject, DefaultInstallDir, GitRepository,
                       MakeCommandKind, ReuseOtherProjectDefaultTargetRepository)
+from ..config.chericonfig import BuildType
 from ..config.compilation_targets import CompilationTargets, CrossCompileTarget
 from ..utils import replace_one
 
 
 # Not really autotools but same sequence of commands (other than the script being call bootstrap instead of configure)
 class BuildCMake(AutotoolsProject):
-    # repository = GitRepository("https://cmake.org/cmake.git")
-    repository = GitRepository("https://github.com/Kitware/CMake",  # a lot faster than the official repo
+    repository = GitRepository("https://github.com/Kitware/CMake",  # a lot faster than "https://cmake.org/cmake.git"
                                # track the stable release branch
                                default_branch="release")
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
@@ -67,8 +67,10 @@ class BuildCrossCompiledCMake(CMakeProject):
     repository = ReuseOtherProjectDefaultTargetRepository(BuildCMake, do_update=True)
     target = "cmake-crosscompiled"  # Can't use cmake here due to command line option conflict
     default_directory_basename = "cmake"
+    default_build_type = BuildType.RELEASE  # Don't include debug info by default
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
-    supported_architectures = CompilationTargets.ALL_CHERIBSD_TARGETS
+    # Also build cmake hybrid so that -hybrid projects can use it with --test
+    supported_architectures = CompilationTargets.ALL_CHERIBSD_TARGETS_WITH_HYBRID
 
     @property
     def essential_compiler_and_linker_flags(self):

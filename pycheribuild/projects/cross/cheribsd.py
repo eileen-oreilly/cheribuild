@@ -88,10 +88,11 @@ class ConfigPlatform(Enum):
     FVP = "fvp"
     GFE = "gfe"
     BERI = "cheri-beri"
+    AWS = "aws-f1"
 
     @classmethod
     def fpga_platforms(cls) -> set:
-        return {cls.BERI, cls.GFE}
+        return {cls.BERI, cls.GFE, cls.AWS}
 
 
 class CheriBSDConfig:
@@ -232,14 +233,9 @@ class RISCVKernelConfigFactory(KernelConfigFactory):
     separator = "-"
     platform_name_map = {
         ConfigPlatform.QEMU: "QEMU",
-        ConfigPlatform.GFE: "GFE"
+        ConfigPlatform.GFE: "GFE",
+        ConfigPlatform.AWS: None
     }
-
-    def __init__(self):
-        # Note: the FETT FPGA kernels do not have the platform name in
-        # the name, so we drop the platform from the kerconf components
-        self.fett_gfe_kernconf_components = OrderedDict(self.kernconf_components)
-        del self.fett_gfe_kernconf_components["platform_name"]
 
     def get_flag_names(self, platform, kABI, default=False, caprevoke=False, mfsroot=False, debug=False,
                        benchmark=False, fuzzing=False, fett=False):
@@ -268,10 +264,12 @@ class RISCVKernelConfigFactory(KernelConfigFactory):
             configs.append(self.make_config(ConfigPlatform.QEMU, kABI, benchmark=True, default=True))
             configs.append(self.make_config(ConfigPlatform.QEMU, kABI, mfsroot=True, default=True))
             configs.append(self.make_config(ConfigPlatform.QEMU, kABI, mfsroot=True, benchmark=True, default=True))
-        # Generate GFE-FPGA kernels
+        # Generate FPGA kernels
         for kABI in KernelABI:
             configs.append(self.make_config(ConfigPlatform.GFE, kABI, mfsroot=True, default=True))
             configs.append(self.make_config(ConfigPlatform.GFE, kABI, mfsroot=True, benchmark=True, default=True))
+            configs.append(self.make_config(ConfigPlatform.AWS, kABI, fett=True))
+            configs.append(self.make_config(ConfigPlatform.AWS, kABI, fett=True, benchmark=True))
 
         # Generate default FETT and caprevoke kernels
         configs.append(self.make_config(ConfigPlatform.QEMU, KernelABI.HYBRID,
@@ -281,12 +279,8 @@ class RISCVKernelConfigFactory(KernelConfigFactory):
         configs.append(self.make_config(ConfigPlatform.GFE, KernelABI.HYBRID,
                                         caprevoke=True, mfsroot=True, default=True))
 
-        # Generate extra FETT kernels
-        for kABI in [KernelABI.NOCHERI, KernelABI.HYBRID]:
-            configs.append(self.make_config(ConfigPlatform.GFE, kABI,
-                                            base_context=self.fett_gfe_kernconf_components, fett=True))
-        configs.append(self.make_config(ConfigPlatform.GFE, KernelABI.HYBRID,
-                                        base_context=self.fett_gfe_kernconf_components, fett=True, caprevoke=True))
+        # Generate extra caprevoke kernels
+        configs.append(self.make_config(ConfigPlatform.AWS, KernelABI.HYBRID, fett=True, caprevoke=True))
         configs.append(self.make_config(ConfigPlatform.QEMU, KernelABI.HYBRID, fett=True, caprevoke=True))
 
         return configs
@@ -439,6 +433,8 @@ class BuildFreeBSDBase(Project):
         # "-DWITH_DIRDEPS_BUILD", "-DWITH_DIRDEPS_CACHE",  # experimental fast build options
         # "-DWITH_LIBCHERI_JEMALLOC"  # use jemalloc instead of -lmalloc_simple
     ]
+    has_optional_tests = True
+    default_build_tests = True
 
     @classmethod
     def can_build_with_ccache(cls):
@@ -467,11 +463,8 @@ class BuildFreeBSDBase(Project):
             cls.minimal = cls.add_bool_option("minimal", show_help=False,
                                               help="Don't build all of FreeBSD, just what is needed for running most "
                                                    "CHERI tests/benchmarks")
-        if "build_tests" not in cls.__dict__:
-            cls.build_tests = cls.add_bool_option("build-tests", help="Build the tests (-DWITH_TESTS/-DWITHOUT_TESTS)",
-                                                  show_help=True, default=True)
 
-    def __init__(self, config):
+    def __init__(self, config, *, use_bootstrap_toolchain: bool):
         super().__init__(config)
         self.make_args.env_vars = {"MAKEOBJDIRPREFIX": str(self.build_dir)}
         # TODO? Avoid lots of nested child directories by using MAKEOBJDIR instead of MAKEOBJDIRPREFIX
@@ -479,7 +472,8 @@ class BuildFreeBSDBase(Project):
 
         if self.crossbuild:
             # Use the script that I added for building on Linux/MacOS:
-            self.make_args.set_command(self.source_dir / "tools/build/make.py")
+            self.make_args.set_command(self.source_dir / "tools/build/make.py",
+                                       early_args=["--bootstrap-toolchain"] if use_bootstrap_toolchain else [])
 
         # The bootstrap tools need libarchive which is not always installed on Linux. macOS ships a libarchive.dylib
         # (without headers) so we use that with the contrib/ headers and don't need an additional package.
@@ -562,6 +556,10 @@ class BuildFreeBSD(BuildFreeBSDBase):
     build_toolchain = FreeBSDToolchainKind.DEFAULT_COMPILER
     can_build_with_system_clang = True  # Not true for CheriBSD
 
+    # cheribsd-mfs-root-kernel doesn't have a default kernel-config, instead
+    # building a set, but kernel-config should still override that.
+    has_default_buildkernel_kernel_config = True
+
     @property
     def use_bootstrapped_toolchain(self):
         return self.build_toolchain == FreeBSDToolchainKind.BOOTSTRAPPED
@@ -579,8 +577,10 @@ class BuildFreeBSD(BuildFreeBSDBase):
             # the global --kernel-config option that is provided for convenience and backwards compat.
             cls.kernel_config = cls.add_config_option(
                 "kernel-config", metavar="CONFIG", show_help=True, extra_fallback_config_names=["kernel-config"],
-                default=ComputedDefaultValue(function=lambda _, p: p.default_kernel_config(),
-                                             as_string="target-dependent, usually GENERIC"),
+                default=ComputedDefaultValue(
+                    function=lambda _, p:
+                        p.default_kernel_config() if p.has_default_buildkernel_kernel_config else None,
+                    as_string="target-dependent, usually GENERIC"),
                 use_default_fallback_config_names=False,  #
                 help="The kernel configuration to use for `make buildkernel`")  # type: str
 
@@ -796,7 +796,7 @@ class BuildFreeBSD(BuildFreeBSDBase):
         return clang_root, None, None
 
     def __init__(self, config: CheriConfig):
-        super().__init__(config)
+        super().__init__(config, use_bootstrap_toolchain=self.use_bootstrapped_toolchain)
         self.install_as_root = os.getuid() == 0
         self.__objdir = None
         self._setup_make_args_called = False
@@ -804,7 +804,8 @@ class BuildFreeBSD(BuildFreeBSDBase):
         self._install_prefix = Path("/")
         self.kernel_toolchain_exists = False
         self.cross_toolchain_config = MakeOptions(MakeCommandKind.BsdMake, self)
-        assert self.kernel_config is not None
+        if self.has_default_buildkernel_kernel_config:
+            assert self.kernel_config is not None
         self.make_args.set(**self.arch_build_flags)
 
         if self.subdir_override:
@@ -954,8 +955,6 @@ class BuildFreeBSD(BuildFreeBSDBase):
         if self.compiling_for_mips(include_purecap=True):
             # Don't build kernel modules for MIPS
             kernel_options.set(NO_MODULES="yes")
-        elif self.compiling_for_riscv(include_purecap=True):
-            kernel_options.set_with_options(CTF=False)  # FIXME: restore once debugged
         elif self.crosscompile_target.is_hybrid_or_purecap_cheri([CPUArchitecture.AARCH64]):
             # Disable CTF for now to avoid the following errors:
             # ERROR: cam_periph.c: die 25130: unknown base type encoding 0xffffffffffffffa1
@@ -1145,6 +1144,8 @@ class BuildFreeBSD(BuildFreeBSDBase):
             make_cmd = Path(shutil.which(self.make_args.command) or self.make_args.command)
         if not make_cmd.exists():
             raise FileNotFoundError(make_cmd)
+        # FIXME: ./bmake-install/bin/bmake -v MAKE_VERSION -f /dev/null -- bootstrap if older than the
+        # contents of contrib/bmake/VERSION
         return make_cmd
 
     def _query_make_var(self, args, var):
@@ -1154,12 +1155,14 @@ class BuildFreeBSD(BuildFreeBSDBase):
             except FileNotFoundError:
                 self.verbose_print("Cannot query buildenv path if bmake hasn't been bootstrapped")
                 return None
-            bw_flags = args.all_commandline_args + ["BUILD_WITH_STRICT_TMPPATH=0",
-                                                    "-f", self.source_dir / "Makefile.inc1",
-                                                    "-m", self.source_dir / "share/mk",
-                                                    "showconfig",
-                                                    "-D_NO_INCLUDE_COMPILERMK",  # avoid calling ${CC} --version
-                                                    "-V", var]
+            query_args = args.copy()
+            query_args.set_command(bmake_binary)
+            bw_flags = query_args.all_commandline_args + ["BUILD_WITH_STRICT_TMPPATH=0",
+                                                          "-f", self.source_dir / "Makefile.inc1",
+                                                          "-m", self.source_dir / "share/mk",
+                                                          "showconfig",
+                                                          "-D_NO_INCLUDE_COMPILERMK",  # avoid calling ${CC} --version
+                                                          "-V", var]
             if not self.source_dir.exists():
                 assert self.config.pretend, "This should only happen when running in a test environment"
                 return None
@@ -1308,6 +1311,11 @@ class BuildFreeBSD(BuildFreeBSDBase):
     def add_cross_build_options(self):
         self.make_args.set_env(CC=self.host_CC, CXX=self.host_CXX, CPP=self.host_CPP,
                                STRIPBIN=shutil.which("strip") or shutil.which("llvm-strip") or "strip")
+        if self.use_bootstrapped_toolchain:
+            assert "XCC" not in self.make_args.env_vars
+            # We have to provide the default X* values so that Makefile.inc1 does not disable MK_CLANG_BOOTSTRAP and
+            # doesn't try to cross-compile using the host compilers
+            self.make_args.set_env(XCC="cc", XCXX="c++", XCPP="cpp")
         # won't work on a case-insensitive file system and is also really slow (and missing tools on linux)
         self.make_args.set_with_options(MAN=False)
         # links from /usr/bin/mail to /usr/bin/Mail won't work on case-insensitve fs
@@ -1431,17 +1439,26 @@ class BuildFreeBSD(BuildFreeBSDBase):
             kerndir = "kernel." + kernconf
         return self.install_dir / "boot" / kerndir / "kernel"
 
-    def get_kern_module_path_arg(self, kernconf: str = None) -> "typing.Optional[str]":
+    def get_kern_module_path(self, kernconf: str = None) -> "typing.Optional[str]":
         """
         Get the path to provide to kern.module_path for the given kernel
         configuration if needed (i.e. the kernel is not the default one).
         """
         if kernconf is None or kernconf == self.kernel_config:
             return None
-        kerndir = Path("/boot") / ("kernel." + kernconf)
-        return "kern.module_path={}".format(kerndir)
+        return "/boot/kernel." + kernconf
 
-    def get_kernel_configs(self, **filter_kwargs) -> "typing.Sequence[str]":
+    def get_kern_module_path_arg(self, kernconf: str = None) -> "typing.Optional[str]":
+        """
+        Get the tunable env var to set kern.module_path for the given kernel
+        configuration if needed (i.e. the kernel is not the default one).
+        """
+        kerndir = self.get_kern_module_path(kernconf)
+        if kerndir:
+            return "kern.module_path={}".format(kerndir)
+        return None
+
+    def get_kernel_configs(self, **filter_kwargs) -> "typing.List[str]":
         """
         Get all the kernel configurations to build. This can be used by external targets to
         fetch the set of kernel configurations that have been built and filter them to account
@@ -1508,6 +1525,9 @@ class BuildFreeBSDUniverse(BuildFreeBSDBase):
     default_install_dir = DefaultInstallDir.DO_NOT_INSTALL
     minimal = False
     hide_options_from_help = True  # hide this from --help for now
+
+    def __init__(self, config):
+        super().__init__(config, use_bootstrap_toolchain=True)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -1607,7 +1627,7 @@ class BuildCHERIBSD(BuildFreeBSD):
 
         cls.default_kernel_abi = cls.add_config_option(
             "default-kernel-abi", show_help=True, _allow_unknown_targets=True,
-            only_add_for_targets=CompilationTargets.ALL_CHERIBSD_CHERI_TARGETS,
+            only_add_for_targets=CompilationTargets.ALL_CHERIBSD_CHERI_TARGETS_WITH_HYBRID,
             kind=KernelABI, default=KernelABI.HYBRID,
             enum_choices=[KernelABI.HYBRID, KernelABI.PURECAP],
             help="Select default kernel to build")
@@ -1708,7 +1728,7 @@ class BuildCHERIBSD(BuildFreeBSD):
         default_kernconf = self.default_kernel_config()
         return [c for c in configs if c.kernconf != default_kernconf]
 
-    def get_kernel_configs(self, **filter_kwargs) -> "typing.Sequence[str]":
+    def get_kernel_configs(self, **filter_kwargs) -> "typing.List[str]":
         default = super().get_kernel_configs(**filter_kwargs)
         extra = filter_kernel_configs(self.extra_kernel_configs(), **filter_kwargs)
         return default + [c.kernconf for c in extra]
@@ -1765,11 +1785,19 @@ class BuildCHERIBSD(BuildFreeBSD):
         super().install(all_kernel_configs=" ".join(available_kernconfs), sysroot_only=self.sysroot_only, **kwargs)
 
 
+def cheribsd_fett_install_dir(config: CheriConfig, project: "BuildCHERIBSD"):
+    return config.output_root / ("rootfs-fett" + project.build_configuration_suffix())
+
+
 class BuildCheriBSDFett(BuildCHERIBSD):
     target = "cheribsd-fett"
-    repository = ReuseOtherProjectRepository(BuildCHERIBSD, do_update=True)
+    # Note: we have to set repo_for_target since we use different CompilationTargets here (with CheriBSDFettTargetInfo)
+    repository = ReuseOtherProjectRepository(BuildCHERIBSD, do_update=True,
+                                             repo_for_target=CompilationTargets.CHERIBSD_RISCV_PURECAP)
     supported_architectures = CompilationTargets.FETT_SUPPORTED_ARCHITECTURES
     default_architecture = CompilationTargets.FETT_DEFAULT_ARCHITECTURE
+    _default_install_dir_fn = cheribsd_fett_install_dir
+
     hide_options_from_help = True  # hide this from --help for now
 
     def __init__(self, config):
@@ -1792,6 +1820,8 @@ class BuildCheriBsdMfsKernel(BuildCHERIBSD):
     supported_architectures = CompilationTargets.ALL_CHERIBSD_MIPS_AND_RISCV_TARGETS
     default_build_dir = ComputedDefaultValue(function=cheribsd_mfsroot_build_dir,
                                              as_string=lambda cls: BuildCHERIBSD.project_build_dir_help())
+    # This exists specifically for this target
+    has_default_buildkernel_kernel_config = False
     # We want the CheriBSD config options as well, so that defaults (e.g. build-alternate-abi-kernels) are inherited.
     _config_inherits_from = BuildCHERIBSD
 
@@ -1875,6 +1905,8 @@ class BuildCheriBsdMfsKernel(BuildCHERIBSD):
         return config.kernconf
 
     def get_kernel_configs(self, **filter_kwargs) -> "typing.List[str]":
+        if self.kernel_config is not None:
+            return [self.kernel_config]
         configs = self._get_all_kernel_configs()
         return [c.kernconf for c in filter_kernel_configs(configs, **filter_kwargs)]
 
@@ -1989,7 +2021,7 @@ class BuildCheriBsdSysrootArchive(SimpleProject):
         return self.rootfs_source_class.supported_architectures
 
     @classmethod
-    def dependencies(cls, config: CheriConfig):
+    def dependencies(cls, config: CheriConfig) -> "list[str]":
         target = cls.get_crosscompile_target(config)  # type: CrossCompileTarget
         if target.is_cheri_purecap([CPUArchitecture.MIPS64]):
             # TODO: can't access this member here...

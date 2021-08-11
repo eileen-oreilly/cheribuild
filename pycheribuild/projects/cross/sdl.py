@@ -1,10 +1,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2021 Alex Richardson
-#
-# This work was supported by Innovate UK project 105694, "Digital Security by
-# Design (DSbD) Technology Platform Prototype".
+# Copyright (c) 2021 Jessica Clarke
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -25,20 +22,28 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from pathlib import Path
 
-from .crosscompileproject import CrossCompileCMakeProject
-from ..project import DefaultInstallDir, GitRepository
-from ...config.compilation_targets import CompilationTargets
+from .crosscompileproject import CrossCompileAutotoolsProject
+from .x11 import BuildLibX11
+from ..project import GitRepository
 
 
-class BuildExpat(CrossCompileCMakeProject):
-    target = "libexpat"
-    native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
-    repository = GitRepository("https://github.com/libexpat/libexpat")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
-    root_cmakelists_subdirectory = Path("expat")
+class BuildSDL(CrossCompileAutotoolsProject):
+    repository = GitRepository("https://github.com/libsdl-org/SDL.git")
+    dependencies = ["libx11", "libxext", "libxrandr", "libxrender", "libxcursor", "libxi", "libxscrnsaver"]
 
     def setup(self):
         super().setup()
-        self.add_cmake_options(EXPAT_BUILD_DOCS=False, EXPAT_BUILD_EXAMPLES=False)
+        # AC_PATH_X doesn't use pkg-config so have to specify manually
+        self.configure_args.append("--x-includes=" + str(BuildLibX11.get_install_dir(self) / "include"))
+        self.configure_args.append("--x-libraries=" + str(BuildLibX11.get_install_dir(self) / "lib"))
+
+
+class BuildSDL_Mixer(CrossCompileAutotoolsProject):
+    repository = GitRepository("https://github.com/libsdl-org/SDL_mixer.git")
+    dependencies = ["sdl"]
+
+
+class BuildSDL_Net(CrossCompileAutotoolsProject):
+    repository = GitRepository("https://github.com/libsdl-org/SDL_net.git")
+    dependencies = ["sdl"]

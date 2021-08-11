@@ -1,10 +1,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2021 Alex Richardson
-#
-# This work was supported by Innovate UK project 105694, "Digital Security by
-# Design (DSbD) Technology Platform Prototype".
+# Copyright (c) 2021 Jessica Clarke
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -25,20 +22,23 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from pathlib import Path
 
-from .crosscompileproject import CrossCompileCMakeProject
-from ..project import DefaultInstallDir, GitRepository
+from .crosscompileproject import CrossCompileAutotoolsProject
+from ..project import GitRepository
 from ...config.compilation_targets import CompilationTargets
 
 
-class BuildExpat(CrossCompileCMakeProject):
-    target = "libexpat"
-    native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
-    repository = GitRepository("https://github.com/libexpat/libexpat")
+class BuildCurl(CrossCompileAutotoolsProject):
+    repository = GitRepository("https://github.com/curl/curl.git")
     supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
-    root_cmakelists_subdirectory = Path("expat")
 
     def setup(self):
         super().setup()
-        self.add_cmake_options(EXPAT_BUILD_DOCS=False, EXPAT_BUILD_EXAMPLES=False)
+        self.configure_args.append("--with-openssl")
+        # Configure script disables auto-detection when cross-compiling
+        if not self._xtarget.is_native():
+            self.configure_args.append("--with-ca-path=/etc/ssl/certs")
+
+    def configure(self, **kwargs):
+        self.run_cmd("autoreconf", "-fi", cwd=self.source_dir)
+        super().configure(**kwargs)

@@ -131,7 +131,7 @@ class BuildDiskImageBase(SimpleProject):
         return self._source_class.supported_architectures
 
     @classmethod
-    def dependencies(cls, config: CheriConfig):
+    def dependencies(cls, config: CheriConfig) -> "list[str]":
         return [cls._source_class.get_class_for_target(cls.get_crosscompile_target(config)).target]
 
     @classmethod
@@ -164,6 +164,8 @@ class BuildDiskImageBase(SimpleProject):
                                                   help="The output path for the QEMU disk image", show_help=True)
         cls.force_overwrite = cls.add_bool_option("force-overwrite", default=True,
                                                   help="Overwrite an existing disk image without prompting")
+        cls.no_autoboot = cls.add_bool_option("no-autoboot", default=False,
+                                              help="Disable autoboot and boot menu for targets that use loader(8)")
 
     def __init__(self, config):
         # TODO: different extra-files directory
@@ -408,6 +410,11 @@ class BuildDiskImageBase(SimpleProject):
         loader_conf_contents = ""
         if self.is_x86:
             loader_conf_contents += "console=\"comconsole\"\nautoboot_delay=0\n"
+        if self.no_autoboot:
+            if self.crosscompile_target.is_aarch64(include_purecap=True) or self.is_x86:
+                loader_conf_contents += "autoboot_delay=\"NO\"\nbeastie_disable=\"YES\"\n"
+            else:
+                self.warning("--no-autoboot is not supported for this target, ignoring.")
         self.create_file_for_image("/boot/loader.conf", contents=loader_conf_contents, mode=0o644)
 
         # Avoid long boot time on first start due to missing entropy:
@@ -424,11 +431,16 @@ class BuildDiskImageBase(SimpleProject):
                     f.write(random_data)
             self.add_file_to_image(entropy_file, base_directory=self.tmpdir)
 
+    @property
+    def _gdb_xtarget(self):
+        # Workaround for FETT (we use the normal GDB target to avoid duplicating yet another project)
+        return self.source_project.get_crosscompile_target(self.config)
+
     def add_gdb(self):
         if not self.include_gdb and not self.include_kgdb:
             return
         # FIXME: if /usr/local/bin/gdb is in the image make /usr/bin/gdb a symlink
-        cross_target = self.source_project.get_crosscompile_target(self.config)
+        cross_target = self._gdb_xtarget
         if cross_target not in BuildGDB.supported_architectures:
             self.warning("GDB cannot be built for architecture ", cross_target, " -> not addding it")
             return
@@ -469,7 +481,9 @@ class BuildDiskImageBase(SimpleProject):
             for ignored_dirname in ('.svn', '.git', '.idea'):
                 if ignored_dirname in dirnames:
                     dirnames.remove(ignored_dirname)
-            for filename in filenames:
+            # Symlinks that point to directories are included in dirnames as a
+            # historical wart that can't be fixed without risking breakage...
+            for filename in filenames + [d for d in dirnames if os.path.islink(Path(root, d))]:
                 new_file = Path(root, filename)
                 if root_dir == self.extra_files_dir:
                     self.extra_files.append(new_file)
@@ -953,7 +967,7 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
         self.mtree.add_dir("var/db", print_status=self.config.verbose)
         self.mtree.add_dir("var/empty", print_status=self.config.verbose)
 
-        if self.is_x86:
+        if self.is_x86 or self.compiling_for_aarch64(include_purecap=True):
             # When booting minimal disk images, we need the files in /boot (kernel+loader), but we omit modules.
             extra_files = []
             for root, dirnames, filenames in os.walk(str(self.rootfs_dir / "boot")):
@@ -998,6 +1012,12 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
             "libssl.so.111",
             "libpam.so.6",
             "libypclnt.so.4",  # needed by pam_unix.so.6
+            # cheribsdbox links these three dynamically since they are needed by other programs too
+            "libprocstat.so.1",
+            "libkvm.so.7",
+            "libelf.so.2",
+            # Needed for backtrace() (required by CTest)
+            "libexecinfo.so.1",  # depends on libelf.so
         ]
         # Add the required PAM libraries for su(1)/login(1)
         for i in ("permit", "rootok", "self", "unix", "nologin", "securetty", "lastlog"):
@@ -1096,7 +1116,7 @@ class BuildCheriBSDDiskImage(BuildDiskImageBase):
     disk_image_prefix = "cheribsd"
 
     @classmethod
-    def dependencies(cls, config):
+    def dependencies(cls, config) -> "list[str]":
         result = super().dependencies(config)
         # GDB is not strictly a dependency, but having it in the disk image makes life a lot easier
         result.append("gdb")

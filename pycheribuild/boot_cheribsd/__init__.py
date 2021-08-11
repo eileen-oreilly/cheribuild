@@ -70,9 +70,15 @@ SUPPORTED_ARCHITECTURES = {x.generic_suffix: x for x in (CompilationTargets.CHER
                                                          CompilationTargets.CHERIBSD_RISCV_PURECAP,
                                                          CompilationTargets.CHERIBSD_X86_64,
                                                          CompilationTargets.CHERIBSD_AARCH64,
+                                                         CompilationTargets.CHERIBSD_MORELLO_HYBRID,
+                                                         CompilationTargets.CHERIBSD_MORELLO_PURECAP,
                                                          )}
 
+AUTOBOOT_PROMPT = re.compile(r"(H|, h)it \[Enter\] to boot ")
+BOOT_LOADER_PROMPT = "OK "
+
 STARTING_INIT = "start_init: trying /sbin/init"
+TRYING_TO_MOUNT_ROOT = re.compile(r"Trying to mount root from .+\.\.\.")
 BOOT_FAILURE = "Enter full pathname of shell or RETURN for /bin/sh"
 BOOT_FAILURE2 = "wait for /bin/sh on /etc/rc failed'"
 BOOT_FAILURE3 = "Manual root filesystem specification:"  # rootfs mount failed
@@ -86,7 +92,7 @@ PANIC = "panic: trap"
 PANIC_KDB = "KDB: enter: panic"
 PANIC_PAGE_FAULT = "panic: Fatal page fault at 0x"
 CHERI_TRAP_MIPS = re.compile(r"USER_CHERI_EXCEPTION: pid \d+ tid \d+ \(.+\)")
-CHERI_TRAP_RISCV = re.compile(r"pid \d+ tid \d+ \(.+\), uid \d+: CHERI fault \(type")
+CHERI_TRAP_RISCV = re.compile(r"pid \d+ tid \d+ \(.+\), uid \d+: CHERI fault \(type 0x")
 # SHELL_LINE_CONTINUATION = "\r\r\n> "
 
 # Similar approach to pexpect.replwrap:
@@ -105,6 +111,7 @@ PEXPECT_CONTINUATION_PROMPT_RE = re.escape(PEXPECT_CONTINUATION_PROMPT)
 FATAL_ERROR_MESSAGES = [CHERI_TRAP_MIPS, CHERI_TRAP_RISCV]
 
 PRETEND = False
+INTERACT_ON_KERNEL_PANIC = False
 MESSAGE_PREFIX = ""
 QEMU_LOGFILE = None  # type: typing.Optional[Path]
 # To keep the port available until we start QEMU
@@ -238,8 +245,10 @@ class CheriBSDSpawnMixin(MixinBase):
                                                   **kwargs)
 
     def expect_prompt(self, timeout=-1, timeout_msg="timeout waiting for prompt", ignore_timeout=False, **kwargs):
-        return self.expect_exact([PEXPECT_PROMPT], timeout=timeout, timeout_msg=timeout_msg,
-                                 ignore_timeout=ignore_timeout, **kwargs)
+        result = self.expect_exact([PEXPECT_PROMPT], timeout=timeout, timeout_msg=timeout_msg,
+                                   ignore_timeout=ignore_timeout, **kwargs)
+        time.sleep(0.05)  # give QEMU a bit of time after printing the prompt (otherwise we might lose some input)
+        return result
 
     def _expect_and_handle_panic_impl(self, options: list, timeout_msg, *, ignore_timeout=True, expect_fn, **kwargs):
         assert PANIC not in options
@@ -251,6 +260,9 @@ class CheriBSDSpawnMixin(MixinBase):
             i = expect_fn(options + panic_regexes, **kwargs)
             if i > len(options):
                 debug_kernel_panic(self)
+                if INTERACT_ON_KERNEL_PANIC:
+                    info("Interating with QEMU due to --interact-on-kernel-panic")
+                    self.interact()
                 failure("EXITING DUE TO KERNEL PANIC!", exit=self.EXIT_ON_KERNEL_PANIC)
             return i
         except pexpect.TIMEOUT as e:
@@ -731,8 +743,9 @@ def start_dhclient(qemu: CheriBSDSpawnMixin, network_iface: str):
 def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path], kernel_image: Path,
                   disk_image: typing.Optional[Path], ssh_port: typing.Optional[int],
                   ssh_pubkey: typing.Optional[Path], *, write_disk_image_changes: bool,
-                  smb_dirs: typing.List[SmbMount] = None, kernel_init_only=False, trap_on_unrepresentable=False,
-                  skip_ssh_setup=False, bios_path: Path = None) -> QemuCheriBSDInstance:
+                  smp_args: "list[str]", smb_dirs: typing.List[SmbMount] = None, kernel_init_only=False,
+                  trap_on_unrepresentable=False, skip_ssh_setup=False, bios_path: Path = None,
+                  boot_alternate_kernel_dir: Path = None) -> QemuCheriBSDInstance:
     user_network_args = ""
     if smb_dirs is None:
         smb_dirs = []
@@ -747,6 +760,8 @@ def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path]
     if not qemu_options.can_boot_kernel_directly:
         if not disk_image:
             failure("Cannot boot kernel directly and no disk image passed!", exit=True)
+    else:
+        assert boot_alternate_kernel_dir is None, "Unexpected alternate kernel parameter for loader(8)"
     if bios_path is not None:
         bios_args = ["-bios", str(bios_path)]
     elif qemu_options.xtarget.is_riscv(include_purecap=True):
@@ -760,6 +775,7 @@ def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path]
                                              trap_on_unrepresentable=trap_on_unrepresentable,  # For debugging
                                              add_virtio_rng=True  # faster entropy gathering
                                              )
+    qemu_args.extend(smp_args)
     kernel_commandline = []
     if kernel_init_only:
         kernel_commandline.append("init_path=/sbin/startup-benchmark.sh")
@@ -768,6 +784,7 @@ def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path]
         kernel_commandline.append("cheribuild.skip_entropy=1")
     if kernel_commandline:
         if kernel_image is not None and qemu_options.can_boot_kernel_directly:
+            kernel_commandline.append("autoboot_delay=0")  # Avoid the 10-second delay when booting
             qemu_args.append("-append")
             qemu_args.append(" ".join(kernel_commandline))
         else:
@@ -788,13 +805,16 @@ def boot_cheribsd(qemu_options: QemuOptions, qemu_command: typing.Optional[Path]
         child.logfile = QEMU_LOGFILE.open("w")
     else:
         child.logfile_read = sys.stdout
+
     boot_and_login(child, starttime=qemu_starttime, kernel_init_only=kernel_init_only,
-                   network_iface=qemu_options.network_interface_name())
+                   network_iface=qemu_options.network_interface_name(),
+                   boot_alternate_kernel_dir=boot_alternate_kernel_dir)
     return child
 
 
 def boot_and_login(child: CheriBSDSpawnMixin, *, starttime, kernel_init_only=False,
-                   network_iface: typing.Optional[str]) -> None:
+                   network_iface: typing.Optional[str],
+                   boot_alternate_kernel_dir: Path = None) -> None:
     have_dhclient = False
     # ignore SIGINT for the python code, the child should still receive it
     # signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -810,19 +830,34 @@ def boot_and_login(child: CheriBSDSpawnMixin, *, starttime, kernel_init_only=Fal
         # BOOTVERBOSE is off for the amd64 kernel, so we don't see the STARTING_INIT message
         # TODO: it would be nice if we had a message to detect userspace startup without requiring bootverbose
         bootverbose = False
-        boot_messages = [STARTING_INIT, "Hit \\[Enter\\] to boot ",
-                         re.compile(r"Trying to mount root from .+\.\.\."),
-                         BOOT_FAILURE, BOOT_FAILURE2, BOOT_FAILURE3] + FATAL_ERROR_MESSAGES
-        i = child.expect(boot_messages, timeout=5 * 60, timeout_msg="timeout before /sbin/init")
-        # Skip 10s wait from x86 loader if we see the "Hit [Enter] to boot" message
-        if i == 1:  # Hit Enter
-            success("Got '", child.match.string, "' from loader")
-            child.sendline("")
-            i = child.expect(boot_messages, timeout=5 * 60, timeout_msg="timeout before /sbin/init")
-        if i == 2:
+        init_messages = [STARTING_INIT, BOOT_FAILURE, BOOT_FAILURE2, BOOT_FAILURE3] + FATAL_ERROR_MESSAGES
+        boot_messages = init_messages + [TRYING_TO_MOUNT_ROOT]
+        loader_boot_prompt_messages = boot_messages + [BOOT_LOADER_PROMPT]
+        loader_boot_messages = loader_boot_prompt_messages + [AUTOBOOT_PROMPT]
+        i = child.expect(loader_boot_messages, timeout=5 * 60, timeout_msg="timeout before loader or kernel")
+        if i >= len(boot_messages):
+            # Skip 10s wait from loader(8) if we see the autoboot message
+            if i == loader_boot_messages.index(AUTOBOOT_PROMPT):  # Hit Enter
+                success("===> loader(8) autoboot")
+                if boot_alternate_kernel_dir:
+                    # Stop autoboot and enter console
+                    child.send("\x1b")
+                    i = child.expect(loader_boot_prompt_messages, timeout=60,
+                                     timeout_msg="timeout before loader prompt")
+                    if i != loader_boot_prompt_messages.index(BOOT_LOADER_PROMPT):
+                        failure("failed to enter boot loader prompt", exit=True)
+                        # Fall through to BOOT_LOADER_PROMPT
+                else:
+                    child.sendline("\r")
+            if i == loader_boot_messages.index(BOOT_LOADER_PROMPT):  # loader(8) prompt
+                success("===> loader(8) waiting boot commands")
+                # Just boot the default kernel if no alternate kernel directory is given
+                child.sendline("boot {}".format(boot_alternate_kernel_dir or ""))
+            i = child.expect(boot_messages, timeout=5 * 60, timeout_msg="timeout before kernel")
+        if i == boot_messages.index(TRYING_TO_MOUNT_ROOT):
             success("===> mounting rootfs")
             if bootverbose:
-                i = child.expect(boot_messages, timeout=5 * 60, timeout_msg="timeout before /sbin/init")
+                i = child.expect(init_messages, timeout=5 * 60, timeout_msg="timeout before /sbin/init")
                 if i != 0:  # start up scripts failed
                     failure("failed to start init", exit=True)
                 userspace_starttime = datetime.datetime.now()
@@ -894,6 +929,8 @@ def _do_test_setup(qemu: QemuCheriBSDInstance, args: argparse.Namespace, test_ar
                    test_setup_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace], None]" = None):
     smb_dirs = qemu.smb_dirs  # type: typing.List[SmbMount]
     setup_tests_starttime = datetime.datetime.now()
+    # Enable userspace CHERI exception logging to aid debugging
+    qemu.run("sysctl machdep.log_user_cheri_exceptions=1 || sysctl machdep.log_cheri_exceptions=1")
     if args.enable_coredumps:
         for smb_dir in smb_dirs:
             # If we are mounting /build or /test-results then set kern.corefile to point there:
@@ -1062,6 +1099,7 @@ def get_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--architecture", help="CPU architecture to be used for this test", required=True,
                         choices=[x for x in SUPPORTED_ARCHITECTURES.keys()])
     parser.add_argument("--qemu-cmd", "--qemu", help="Path to QEMU (default: find matching on in $PATH)", default=None)
+    parser.add_argument("--qemu-smp", "--smp", type=int, help="Run QEMU with SMP", default=None)
     parser.add_argument("--kernel", default=None)
     parser.add_argument("--bios", default=None)
     parser.add_argument("--disk-image", default=None)
@@ -1107,9 +1145,14 @@ def get_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pretend", "-p", action="store_true",
                         help="Don't actually boot CheriBSD just print what would happen")
     parser.add_argument("--interact", "-i", action="store_true")
+    parser.add_argument("--interact-on-kernel-panic", action="store_true",
+                        help="Instead of exiting on kernel panic start interacting with QEMU")
     parser.add_argument("--test-kernel-init-only", action="store_true")
     parser.add_argument("--enable-coredumps", action="store_true", dest="enable_coredumps", default=False)
     parser.add_argument("--disable-coredumps", action="store_false", dest="enable_coredumps")
+    parser.add_argument("--alternate-kernel-rootfs-path", type=Path, default=None,
+                        help="Path relative to the disk image pointing to the directory " +
+                             "containing the alternate kernel to run and related kernel modules")
 
     # Ensure that we don't get a race when running multiple shards:
     # If we extract the disk image at the same time we might spawn QEMU just between when the
@@ -1169,9 +1212,11 @@ def _main(test_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace]
         if args.qemu_cmd is None:
             failure("ERROR: Cannot find QEMU binary for target ", qemu_options.qemu_arch_sufffix, exit=True)
 
-    global PRETEND
+    global PRETEND, INTERACT_ON_KERNEL_PANIC
     if args.pretend:
         PRETEND = True
+    if args.interact_on_kernel_panic:
+        INTERACT_ON_KERNEL_PANIC = True
     global QEMU_LOGFILE
     if args.qemu_logfile:
         QEMU_LOGFILE = args.qemu_logfile
@@ -1243,8 +1288,10 @@ def _main(test_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace]
     qemu = boot_cheribsd(qemu_options, qemu_command=args.qemu_cmd, kernel_image=kernel, disk_image=diskimg,
                          ssh_port=args.ssh_port, ssh_pubkey=Path(args.ssh_key), smb_dirs=args.smb_mount_directories,
                          kernel_init_only=args.test_kernel_init_only,
+                         smp_args=["-smp", str(args.qemu_smp)] if args.qemu_smp else [],
                          trap_on_unrepresentable=args.trap_on_unrepresentable, skip_ssh_setup=args.skip_ssh_setup,
-                         bios_path=args.bios, write_disk_image_changes=args.write_disk_image_changes)
+                         bios_path=args.bios, write_disk_image_changes=args.write_disk_image_changes,
+                         boot_alternate_kernel_dir=args.alternate_kernel_rootfs_path)
     success("Booting CheriBSD took: ", datetime.datetime.now() - boot_starttime)
 
     tests_okay = True

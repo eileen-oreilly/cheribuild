@@ -25,20 +25,12 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from pathlib import Path
-
-from .crosscompileproject import CrossCompileCMakeProject
-from ..project import DefaultInstallDir, GitRepository
-from ...config.compilation_targets import CompilationTargets
+from .project import CMakeProject, DefaultInstallDir, GitRepository
 
 
-class BuildExpat(CrossCompileCMakeProject):
-    target = "libexpat"
-    native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
-    repository = GitRepository("https://github.com/libexpat/libexpat")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
-    root_cmakelists_subdirectory = Path("expat")
-
-    def setup(self):
-        super().setup()
-        self.add_cmake_options(EXPAT_BUILD_DOCS=False, EXPAT_BUILD_EXAMPLES=False)
+# Faster Python version creduce
+class BuildCVise(CMakeProject):
+    target = "cvise"
+    repository = GitRepository("https://github.com/marxin/cvise")
+    dependencies = ["llvm"]
+    default_install_dir = DefaultInstallDir.CHERI_SDK

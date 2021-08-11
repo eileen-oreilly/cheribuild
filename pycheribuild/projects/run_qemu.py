@@ -102,6 +102,7 @@ class LaunchQEMUBase(SimpleProject):
                                             help="Run qemu in 'snapshot' mode, changes to the disk image "
                                                  "are non-persistent")
 
+        # TODO: add a shortcut for vnc?
         cls.extra_tcp_forwarding = cls.add_config_option("extra-tcp-forwarding", kind=list, default=(),
                                                          help="Additional TCP bridge ports beyond ssh/22; "
                                                               "list of [hostip:]port=[guestip:]port")
@@ -180,7 +181,7 @@ class LaunchQEMUBase(SimpleProject):
 
         if self.forward_ssh_port and not self.is_port_available(self.ssh_forwarding_port):
             self.print_port_usage(self.ssh_forwarding_port)
-            self.fatal("SSH forwarding port", self.ssh_forwarding_port, "is already in use! Make sure you don't ",
+            self.fatal("SSH forwarding port", self.ssh_forwarding_port, "is already in use! Make sure you don't "
                        "already have a QEMU instance running or change the chosen port by setting the config option",
                        self.get_config_option_name("ssh_forwarding_port"))
 
@@ -466,9 +467,8 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
                     self.warning("Can not select kernel ABI to run for non-CHERI target, ignoring --kernel-abi")
             self.kernel_config = self.source_project.default_kernel_config(ConfigPlatform.QEMU, **config_filters)
 
-        self.current_kernel = self.source_project.get_kernel_install_path(self.kernel_config)
-
         if self.qemu_options.can_boot_kernel_directly:
+            self.current_kernel = self.source_project.get_kernel_install_path(self.kernel_config)
             kern_module_path_arg = self.source_project.get_kern_module_path_arg(self.kernel_config)
             if kern_module_path_arg:
                 self._project_specific_options += ["-append", kern_module_path_arg]
@@ -527,7 +527,7 @@ class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
         return self._source_class.default_architecture
 
     @classmethod
-    def dependencies(cls: "typing.Type[_RunMultiArchFreeBSDImage]", config: CheriConfig):
+    def dependencies(cls: "typing.Type[_RunMultiArchFreeBSDImage]", config: CheriConfig) -> "list[str]":
         xtarget = cls.get_crosscompile_target(config)
         qemu = "qemu"
         if xtarget.is_hybrid_or_purecap_cheri([CPUArchitecture.AARCH64]):
@@ -556,7 +556,7 @@ class LaunchCheriBSD(_RunMultiArchFreeBSDImage):
             super().setup_config_options(default_ssh_port=get_default_ssh_forwarding_port(add_to_port), **kwargs)
 
     @classmethod
-    def dependencies(cls, config: CheriConfig):
+    def dependencies(cls, config: CheriConfig) -> "list[str]":
         result = super().dependencies(config)
         # RISCV needs OpenSBI/BBL to run:
         # Note: QEMU 4.2+ embeds opensbi, for CHERI, we have to use BBL (for now):
@@ -566,8 +566,12 @@ class LaunchCheriBSD(_RunMultiArchFreeBSDImage):
         return result
 
     def run_tests(self):
+        rootfs_kernel_bootdir = None
+        if not self.qemu_options.can_boot_kernel_directly:
+            rootfs_kernel_bootdir = self.source_project.get_kern_module_path(self.kernel_config)
         self.target_info.run_cheribsd_test_script("run_cheribsd_tests.py", disk_image_path=self.disk_image,
-                                                  kernel_path=self.current_kernel)
+                                                  kernel_path=self.current_kernel,
+                                                  rootfs_alternate_kernel_dir=rootfs_kernel_bootdir)
 
 
 class LaunchCheriOSQEMU(LaunchQEMUBase):

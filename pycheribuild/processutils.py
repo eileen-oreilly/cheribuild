@@ -70,7 +70,7 @@ def set_env(*, print_verbose_only=True, config: ConfigBase = None, **environ):
     """
     Temporarily set the process environment variables.
 
-    >>> with set_env(PLUGINS_DIR=u'test/plugins'):
+    >>> with set_env(PLUGINS_DIR='test/plugins'):
     ...   "PLUGINS_DIR" in os.environ
     True
 
@@ -78,19 +78,28 @@ def set_env(*, print_verbose_only=True, config: ConfigBase = None, **environ):
     False
 
     """
-    if config is None:
-        config = get_global_config()  # TODO: remove
-    old_environ = dict(os.environ)
-    # make sure all environment variables are converted to string
-    str_environ = dict((str(k), str(v)) for k, v in environ.items())
-    for k, v in str_environ.items():
-        print_command("export", k + "=" + v, print_verbose_only=print_verbose_only, config=config)
-    os.environ.update(str_environ)
+    changed_values = dict()  # type: dict[str, str]
+    if environ:
+        if config is None:
+            config = get_global_config()  # TODO: remove
+        should_print_update = not print_verbose_only or config.verbose
+        for k, v in environ.items():
+            # make sure all environment variables are converted to string
+            new_value = str(v)
+            old_value = os.getenv(k, None)
+            if should_print_update:
+                print_command("export", k + "=" + new_value, print_verbose_only=print_verbose_only, config=config)
+            if new_value != old_value:
+                changed_values[k] = old_value
+                os.environ[k] = new_value
     try:
         yield
     finally:
-        os.environ.clear()
-        os.environ.update(old_environ)
+        for var, prev_value in changed_values.items():
+            if prev_value is None:
+                del os.environ[var]
+            else:
+                os.environ[var] = prev_value
 
 
 class TtyState:
@@ -443,7 +452,9 @@ class CompilerInfo(object):
         self.default_target = default_target
         self.config = config
         self._resource_dir = None  # type: typing.Optional[Path]
-        self._supported_warning_flags = dict()  # type: typing.Dict[str, bool]
+        self._supported_warning_flags = dict()  # type: dict[str, bool]
+        self._supported_sanitizer_flags = dict()  # type: dict[tuple[str, tuple[str]], bool]
+        self._include_dirs = dict()  # type: dict[tuple[str], list[Path]]
         assert compiler in ("unknown compiler", "clang", "apple-clang", "gcc"), "unknown type: " + compiler
 
     def get_resource_dir(self) -> Path:
@@ -466,6 +477,31 @@ class CompilerInfo(object):
                 self._resource_dir = Path(resource_dir_pat.search(cc1_cmd.stderr).group(1).decode("utf-8"))
         return self._resource_dir
 
+    def get_include_dirs(self, basic_flags: "list[str]") -> "list[Path]":
+        include_dirs = self._include_dirs.get(tuple(basic_flags), None)
+        if include_dirs is None:
+            # pretend to compile an existing source file and capture the -resource-dir output
+            output = run_command(self.path, "-E", "-Wp,-v", "-xc", "/dev/null", config=self.config,
+                                 stdout=subprocess.DEVNULL, capture_error=True, print_verbose_only=True,
+                                 run_in_pretend_mode=True).stderr
+            found_start = False
+            include_dirs = []
+            for line in io.BytesIO(output).readlines():
+                if not found_start:
+                    if line.startswith(b"#include <...> search starts here:"):
+                        found_start = True
+                    continue  # keep going until we find the start
+                if line.startswith(b"End of search list."):
+                    break  # end of include list
+                if line.startswith(b" "):
+                    include_dirs.append(Path(line.strip().decode("utf-8")))
+            if not include_dirs:
+                warning_message("Could not determine include dirs for", self.path, basic_flags)
+            if self.config.verbose:
+                print("Include paths for", self.path, basic_flags, "are", include_dirs)
+            self._include_dirs[tuple(basic_flags)] = include_dirs
+        return list(include_dirs)
+
     def _supports_warning_flag(self, flag: str):
         assert flag.startswith("-W")
         try:
@@ -477,12 +513,39 @@ class CompilerInfo(object):
             return False
         return result.returncode == 0
 
+    def _supports_sanitizer_flag(self, sanitzer_flag: str, arch_flags: "list[str]"):
+        assert sanitzer_flag.startswith("-fsanitize")
+        try:
+            result = run_command(self.path, *arch_flags, sanitzer_flag, "-c", "-xc", "/dev/null", "-Werror",
+                                 "-o", "/dev/null", print_verbose_only=True, run_in_pretend_mode=True,
+                                 capture_error=True, allow_unexpected_returncode=True, config=self.config)
+        except (subprocess.CalledProcessError, OSError) as e:
+            warning_message("Failed to check for", sanitzer_flag, "support:", e)
+            return False
+        return result.returncode == 0
+
+    def supports_sanitizer_flag(self, sanitzer_flag: str, arch_flags: "list[str]"):
+        result = self._supported_sanitizer_flags.get((sanitzer_flag, tuple(arch_flags)))
+        if result is None:
+            result = self._supports_sanitizer_flag(sanitzer_flag, arch_flags)
+            self._supported_sanitizer_flags[(sanitzer_flag, tuple(arch_flags))] = result
+        return result
+
     def supports_warning_flag(self, flag: str):
         result = self._supported_warning_flags.get(flag)
         if result is None:
             result = self._supports_warning_flag(flag)
             self._supported_warning_flags[flag] = result
         return result
+
+    def supports_Og_flag(self):
+        if self.compiler == "gcc" and self.version > (4, 8, 0):
+            return True
+        if self.compiler == "clang" and self.version > (4, 0, 0):
+            return True
+        if self.is_apple_clang:
+            return True  # assume version is new enough to be based on clang 4
+        return False
 
     def linker_override_flags(self, linker: Path, linker_type: str = None) -> "list[str]":
         if not self.is_clang:
